@@ -51,10 +51,16 @@ async fn main(_spawner: Spawner) {
     // Structure the pixel lifetimes as sequence of columns so that pages can be read
     // contiguously for better cache performance.
     let mut pixel_lifetimes = [[0u8; 64]; 128];
-    let corners = [Point(64, 0), Point(32, 63), Point(96, 63)];
-    let mut cursor = corners[0];
-    // thread_rng() doesn't exist for no_std, but rand provides SmallRng behind a feature flag.
-    let rng = &mut rand::rngs::SmallRng::from_seed(*b"I am an adequate seed of chaos:)");
+    let mut sierpinski_iterator = {
+        let corners = [Point(64, 0), Point(32, 63), Point(96, 63)];
+        let mut cursor = corners[0];
+        // thread_rng() doesn't exist for no_std, but rand provides SmallRng behind a feature flag.
+        let mut rng = rand::rngs::SmallRng::from_seed(*b"I am an adequate seed of chaos:)");
+        core::iter::from_fn(move || {
+            cursor = cursor.midpoint(corners.choose(&mut rng).unwrap());
+            Some(cursor)
+        })
+    };
 
     loop {
         // Reduce every pixel's lifetime.
@@ -72,11 +78,10 @@ async fn main(_spawner: Spawner) {
 
         // Light up several random pixels of the Sierpinski triangle in this frame.
         for _ in 0..5 {
-            cursor = cursor.midpoint(corners.choose(rng).unwrap());
-            info!("Cursor: {},{}", cursor.0, cursor.1);
-            let pixel = &mut pixel_lifetimes[cursor.0 as usize][cursor.1 as usize];
+            let cursor = sierpinski_iterator.next().unwrap();
+            let pixel = &mut pixel_lifetimes[cursor.0][cursor.1];
             if *pixel == 0 {
-                drawer.mark_dirty_pixel(cursor.0 as usize, cursor.1 as usize);
+                drawer.mark_dirty_pixel(cursor.0, cursor.1);
             }
             // Live for the given number of frames.
             *pixel = 100;
@@ -89,7 +94,7 @@ async fn main(_spawner: Spawner) {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Point(u16, u16);
+struct Point(usize, usize);
 impl Point {
     fn midpoint(&self, other: &Self) -> Self {
         let x = (self.0 + other.0) / 2;
