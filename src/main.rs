@@ -46,9 +46,9 @@ async fn main(_spawner: Spawner) {
 
     info!("Clearing complete");
 
-    // Structure the buffer as sequence of columns so that pages can be read
+    // Structure the pixel lifetimes as sequence of columns so that pages can be read
     // contiguously for better cache performance.
-    let mut buffer = [[0u8; 64]; 128];
+    let mut pixel_lifetimes = [[0u8; 64]; 128];
     let corners = [Point(64, 0), Point(32, 63), Point(96, 63)];
     let mut cursor = corners[0];
     // thread_rng() doesn't exist for no_std, but rand provides SmallRng behind a feature flag.
@@ -64,25 +64,25 @@ async fn main(_spawner: Spawner) {
         // Track whether any of the 128 columns by 8 rows of pages (64 rows of pixels) need to be resent.
         let mut resend = [[false; 8]; 128];
 
-        // Reduce every pixel's time to live.
-        for (x, col) in buffer.iter_mut().enumerate() {
-            for (y, ttl) in col.iter_mut().enumerate() {
-                if *ttl == 0 {
+        // Reduce every pixel's lifetime.
+        for (x, col) in pixel_lifetimes.iter_mut().enumerate() {
+            for (y, lifetime) in col.iter_mut().enumerate() {
+                if *lifetime == 0 {
                     continue;
                 }
-                *ttl -= 1;
-                if *ttl == 0 {
-                    // Divide by 8 to get the page row index
+                *lifetime -= 1;
+                if *lifetime == 0 {
+                    // Divide by 8 to get the page row index.
                     resend[x][y / 8] = true;
                 }
             }
         }
 
-        // Light up 10 random pixels of the Sierpinski triangle.
+        // Light up several random pixels of the Sierpinski triangle in this frame.
         for _ in 0..5 {
             cursor = cursor.midpoint(corners.choose(rng).unwrap());
             info!("Cursor: {},{}", cursor.0, cursor.1);
-            let pixel = &mut buffer[cursor.0 as usize][cursor.1 as usize];
+            let pixel = &mut pixel_lifetimes[cursor.0 as usize][cursor.1 as usize];
             if *pixel == 0 {
                 resend[cursor.0 as usize][cursor.1 as usize / 8] = true;
             }
@@ -95,15 +95,15 @@ async fn main(_spawner: Spawner) {
             { pages.iter().enumerate() }.filter_map(move |(y8, dirty)| dirty.then_some((x, y8)))
         }) {
             // Accumulate bits in reverse to build the page.
-            let page = { buffer[x][y8 * 8..(y8 + 1) * 8].iter().rev() }
-                .fold(0u8, |acc, ttl| (*ttl > 0) as u8 + (acc << 1));
+            let page = { pixel_lifetimes[x][y8 * 8..(y8 + 1) * 8].iter().rev() }
+                .fold(0u8, |acc, lifetime| (*lifetime > 0) as u8 + (acc << 1));
 
             // Skip the dummy columns.
             display.set_column(2 + x as u8).await.unwrap();
             display.set_row(y8 as u8 * 8).await.unwrap();
             display.draw(&[page; 1]).await.unwrap();
         }
-        // 100 fps minus overhead
+        // 100 fps minus overhead.
         delay.delay_ms(10).await;
     }
 }
