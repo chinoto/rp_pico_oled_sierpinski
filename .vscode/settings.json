@@ -1,6 +1,6 @@
 {
   "rust-analyzer.cargo.target": "thumbv6m-none-eabi",
-  "cSpell.words": ["nmagic", "Tdefmt", "Tlink"],
+  "cSpell.words": ["nmagic", "oled", "rngs", "Tdefmt", "Tlink", "txonly"],
   "rust-analyzer.check.targets": ["thumbv6m-none-eabi"],
   "rust-analyzer.check.allTargets": false
 }
