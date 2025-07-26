@@ -47,10 +47,8 @@ async fn main(_spawner: Spawner) {
 
     info!("Clearing complete");
 
-    let mut drawer = Ssd1306Drawer::new(display);
-    // Structure the pixel lifetimes as sequence of columns so that pages can be read
-    // contiguously for better cache performance.
-    let mut pixel_lifetimes = [[0u8; 64]; 128];
+    let mut drawer = FadingBufferedDrawer::new(display);
+
     let mut sierpinski_iterator = {
         let corners = [Point(64, 0), Point(32, 63), Point(96, 63)];
         let mut cursor = corners[0];
@@ -63,31 +61,15 @@ async fn main(_spawner: Spawner) {
     };
 
     loop {
-        // Reduce every pixel's lifetime.
-        for (x, col) in pixel_lifetimes.iter_mut().enumerate() {
-            for (y, lifetime) in col.iter_mut().enumerate() {
-                if *lifetime == 0 {
-                    continue;
-                }
-                *lifetime -= 1;
-                if *lifetime == 0 {
-                    drawer.mark_dirty_pixel(x, y);
-                }
-            }
-        }
+        drawer.decrease_lifetimes();
 
         // Light up several random pixels of the Sierpinski triangle in this frame.
         for _ in 0..5 {
-            let cursor = sierpinski_iterator.next().unwrap();
-            let pixel = &mut pixel_lifetimes[cursor.0][cursor.1];
-            if *pixel == 0 {
-                drawer.mark_dirty_pixel(cursor.0, cursor.1);
-            }
-            // Live for the given number of frames.
-            *pixel = 100;
+            let point = sierpinski_iterator.next().unwrap();
+            drawer.set_pixel_lifetime(point, 100);
         }
 
-        drawer.draw_pixels(&pixel_lifetimes).await;
+        drawer.draw_pixels().await;
         // 100 fps minus overhead.
         delay.delay_ms(10).await;
     }
@@ -107,50 +89,65 @@ impl Point {
 // generics and type inference to avoid specifying it since it isn't needed by
 // the implementation blocks and allows changing which SPI controller is used.
 // SIZE and MODE are specified here to avoid needing generics for them elsewhere when using this type.
-struct Ssd1306Drawer<DI> {
+struct FadingBufferedDrawer<DI> {
     display: Ssd1306Async<DI, DisplaySize128x64, BufferedGraphicsModeAsync<DisplaySize128x64>>,
+    // Structure the pixel lifetimes as sequence of columns so that pages can be read
+    // contiguously for better cache performance.
+    pixel_lifetimes: [[u8; 64]; 128],
     // Tracks whether any of the 128 columns by 8 rows of pages (64 rows of pixels) need to be resent.
     resend: [[bool; 8]; 128],
 }
 
-impl<DI> Ssd1306Drawer<DI> {
+impl<DI> FadingBufferedDrawer<DI> {
     fn new(
         display: Ssd1306Async<DI, DisplaySize128x64, BufferedGraphicsModeAsync<DisplaySize128x64>>,
     ) -> Self {
         Self {
             display,
+            pixel_lifetimes: [[0; 64]; 128],
             resend: [[false; 8]; 128],
         }
     }
 }
 
-trait Draw {
-    // An implementation can use this to track which pixels are dirty in
-    // whatever way makes sense and only draw what is required when draw_pixels
-    // is called. Users of this trait must call this method, otherwise an
-    // implementation that tracks dirty pixels will not draw anything.
-    fn mark_dirty_pixel(&mut self, _x: usize, _y: usize) {}
-    async fn draw_pixels(&mut self, pixel_lifetimes: &[[u8; 64]; 128]);
-}
-
-impl<DI: AsyncWriteOnlyDataCommand> Draw for Ssd1306Drawer<DI> {
-    fn mark_dirty_pixel(&mut self, x: usize, y: usize) {
-        self.resend[x][y / 8] = true;
+impl<DI: AsyncWriteOnlyDataCommand> FadingBufferedDrawer<DI> {
+    fn decrease_lifetimes(&mut self) {
+        for (x, col) in self.pixel_lifetimes.iter_mut().enumerate() {
+            for (y, lifetime) in col.iter_mut().enumerate() {
+                if *lifetime == 0 {
+                    continue;
+                }
+                *lifetime -= 1;
+                if *lifetime == 0 {
+                    self.resend[x][y / 8] = true;
+                }
+            }
+        }
     }
 
-    async fn draw_pixels(&mut self, pixel_lifetimes: &[[u8; 64]; 128]) {
-        // Find all the dirty pages to resend.
-        for (x, y8) in self.resend.iter().enumerate().flat_map(|(x, pages)| {
-            { pages.iter().enumerate() }.filter_map(move |(y8, dirty)| dirty.then_some((x, y8)))
-        }) {
-            // Accumulate bits in reverse to build the page.
-            let page = { pixel_lifetimes[x][y8 * 8..][..8].iter().rev() }
-                .fold(0u8, |acc, lifetime| (*lifetime > 0) as u8 + (acc << 1));
+    fn set_pixel_lifetime(&mut self, Point(x, y): Point, new_lifetime: u8) {
+        let lifetime = &mut self.pixel_lifetimes[x][y];
+        // If the liveness of a pixel will change, mark its page as dirty.
+        if (*lifetime != 0) != (new_lifetime != 0) {
+            self.resend[x][y / 8] = true;
+        }
+        // Live for the given number of frames.
+        *lifetime = new_lifetime;
+    }
 
-            // Skip the dummy columns.
-            self.display.set_column(2 + x as u8).await.unwrap();
-            self.display.set_row(y8 as u8 * 8).await.unwrap();
-            self.display.draw(&[page; 1]).await.unwrap();
+    async fn draw_pixels(&mut self) {
+        // Find all the dirty pages to resend.
+        for (x, col) in self.resend.iter().enumerate() {
+            for y8 in { col.iter().enumerate() }.filter_map(|(y8, page)| page.then_some(y8)) {
+                // Accumulate bits in reverse to build the page.
+                let page = { self.pixel_lifetimes[x][y8 * 8..][..8].iter().rev() }
+                    .fold(0u8, |acc, lifetime| (*lifetime > 0) as u8 + (acc << 1));
+
+                // Skip the dummy columns.
+                self.display.set_column(2 + x as u8).await.unwrap();
+                self.display.set_row(y8 as u8 * 8).await.unwrap();
+                self.display.draw(&[page; 1]).await.unwrap();
+            }
         }
 
         self.resend = [[false; 8]; 128];
